@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · See your first change events</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+
+<header class="lesson-head">
+  <div class="kicker">Lesson 1 · Stage 1: Postgres as a CDC source</div>
+  <h1>See your first change events</h1>
+  <p class="subtitle">You'll make Postgres show you every insert, update and delete as a stream of events. This is the raw material the rest of the pipeline is built on. About 30 minutes.</p>
+</header>
+
+<p class="mission">Why this matters for your mission: Debezium, Kafka, Flink and StarRocks only ever see what Postgres hands them here. If you can read this stream directly, you can troubleshoot the very first hop of the pipeline.</p>
+
+<h2>Three ideas, just enough to start</h2>
+
+<h3>1. The WAL: Postgres writes it down first</h3>
+<p>Before Postgres changes any table on disk, it appends a record of the change to the <dfn>write-ahead log (WAL)</dfn>. The docs put it plainly: changes to data files "must be written only after those changes have been logged."<a class="cite" href="https://www.postgresql.org/docs/18/wal-intro.html">[1]</a> The WAL exists for crash recovery, but it has a useful side effect: <strong>Postgres already keeps an ordered list of every change ever made.</strong></p>
+<p>Every position in that log has an address called an <dfn>LSN</dfn> (Log Sequence Number), written like <code>0/1BDDA38</code>. LSNs only go up, so they work like page numbers in the log.</p>
+
+<h3>2. Logical decoding: turning the log into row changes</h3>
+<p>The WAL describes changes at the storage level ("these bytes on this page changed"), which is useless to anyone outside Postgres. <dfn>Logical decoding</dfn> translates it into readable row changes, "a coherent, easy to understand format."<a class="cite" href="https://www.postgresql.org/docs/18/logicaldecoding-explanation.html">[2]</a> The translator is an <dfn>output plugin</dfn>. Today you'll use <code>test_decoding</code>, which prints plain text. Debezium will later use a different plugin, <code>pgoutput</code>, which reads the same log but produces a binary format.</p>
+<p>This only works if Postgres runs with <code>wal_level=logical</code>, which makes it record a bit more detail in the WAL. The project's <code>docker-compose.yml</code> already sets this; open the file and find the line.</p>
+
+<h3>3. Replication slots: the bookmark</h3>
+<p>A <dfn>replication slot</dfn> is a named bookmark that Postgres keeps for one consumer. It remembers how far that consumer has read.<a class="cite" href="https://www.postgresql.org/docs/18/logicaldecoding-explanation.html#LOGICALDECODING-REPLICATION-SLOTS">[2]</a> Reading changes comes in two styles:<a class="cite" href="https://www.postgresql.org/docs/18/functions-admin.html#FUNCTIONS-REPLICATION">[3]</a></p>
+<ul>
+  <li><code>pg_logical_slot_<strong>peek</strong>_changes</code> shows you the changes but <em>doesn't</em> move the bookmark.</li>
+  <li><code>pg_logical_slot_<strong>get</strong>_changes</code> shows you the changes and <em>moves the bookmark past them</em>, so you won't see them again.</li>
+</ul>
+
+<pre class="diagram">
+  INSERT / UPDATE / DELETE
+            │
+            ▼
+   WAL  ─────────────────────────────────▶  (ordered by LSN)
+            │  logical decoding (output plugin)
+            ▼
+   replication slot  "how far has this consumer read?"
+            │
+            ▼
+   you, today (later: Debezium)
+</pre>
+
+<h2>Do it</h2>
+
+<ol class="steps">
+  <li>
+    <strong>Make the <code>docker</code> command available.</strong> On this Mac, Docker's command-line tool isn't on your PATH yet. In a terminal:
+<pre><code>export PATH="$HOME/.docker/bin:$PATH"
+docker version</code></pre>
+    To make this permanent, add the <code>export</code> line to <code>~/.zshrc</code>.
+  </li>
+
+  <li>
+    <strong>Start Postgres</strong> from the repo root, then open a SQL prompt inside the container:
+<pre><code>cd ~/code/realtime-cdc-pipeline
+docker compose up -d postgres
+docker compose exec postgres psql -U postgres -d shop</code></pre>
+    Check the setting from idea 2:
+<pre><code>SHOW wal_level;</code></pre>
+  </li>
+
+  <li>
+    <strong>Create a table and a slot.</strong>
+<pre><code>CREATE TABLE orders (id serial PRIMARY KEY, item text NOT NULL, qty int NOT NULL);
+
+SELECT * FROM pg_create_logical_replication_slot('lesson1_slot', 'test_decoding');</code></pre>
+    The slot starts reading from the LSN it returns. Anything that happened earlier, including the <code>CREATE TABLE</code>, comes before the bookmark.
+  </li>
+
+  <li>
+    <strong>Make three changes</strong>, each in its own transaction:
+<pre><code>INSERT INTO orders (item, qty) VALUES ('coffee beans', 2);
+UPDATE orders SET qty = 3 WHERE id = 1;
+DELETE FROM orders WHERE id = 1;</code></pre>
+    The table is now empty. The <em>history</em> of what happened to it isn't.
+  </li>
+
+  <li>
+    <div class="predict">Before you run the next query, write down your guesses. How many rows will it return? (Hint: each transaction has a start and an end.) What will the DELETE line contain?</div>
+<pre><code>SELECT * FROM pg_logical_slot_peek_changes('lesson1_slot', NULL, NULL);</code></pre>
+    <details><summary>Check your prediction</summary>
+      <p>9 rows: a <code>BEGIN</code>, one change and a <code>COMMIT</code> for each of the 3 transactions. Each row has an <code>lsn</code>, a transaction id (<code>xid</code>) and the decoded <code>data</code>. Your LSNs will differ from anyone else's.</p>
+      <p>Look closely at the DELETE line: it shows <em>only</em> <code>id[integer]:1</code>. By default Postgres records just the primary key of a deleted row. That will matter a lot downstream, and lesson 4 covers it.</p>
+    </details>
+  </li>
+
+  <li>
+    <strong>Test the bookmark.</strong> Run each line and compare the counts:
+<pre><code>SELECT count(*) FROM pg_logical_slot_peek_changes('lesson1_slot', NULL, NULL);  -- again
+SELECT count(*) FROM pg_logical_slot_get_changes('lesson1_slot', NULL, NULL);   -- consume
+SELECT count(*) FROM pg_logical_slot_get_changes('lesson1_slot', NULL, NULL);   -- and again?</code></pre>
+    <details><summary>What you should see</summary>
+      <p>9, 9, then 0. Peeking left the bookmark where it was. The first <code>get</code> read the changes <em>and</em> moved the bookmark, so the second <code>get</code> has nothing new. This is how a real consumer works: read, then record your progress.</p>
+    </details>
+  </li>
+
+  <li>
+    <strong>Look at the bookmark itself</strong>, then delete it:
+<pre><code>SELECT slot_name, plugin, active, restart_lsn, confirmed_flush_lsn FROM pg_replication_slots;
+
+SELECT pg_drop_replication_slot('lesson1_slot');</code></pre>
+    <code>confirmed_flush_lsn</code> is how far the consumer has confirmed reading. Why drop the slot? Postgres keeps every WAL record a slot still needs, <em>even if no one is connected</em>. The docs warn that a forgotten slot keeps consuming storage and, in extreme cases, can force the database to shut down.<a class="cite" href="https://www.postgresql.org/docs/18/logicaldecoding-explanation.html#LOGICALDECODING-REPLICATION-SLOTS">[2]</a> Lesson 2 lets you watch that happen safely.
+  </li>
+
+  <li>Type <code>\q</code> to leave psql. You can leave the container running.</li>
+</ol>
+
+<h2>Check yourself</h2>
+<p>Answer from memory, without scrolling up. Having to dig for an answer is what makes it stick.</p>
+
+<div class="quiz">
+  <div class="quiz-q" data-answer="0">
+    <p class="q">1. You ran peek twice and got the same nine rows both times. Why?</p>
+    <button>peek reads without moving the bookmark</button>
+    <button>the slot was inactive the whole time</button>
+    <button>test_decoding prints every change twice</button>
+    <button>the transactions had not committed yet</button>
+    <p class="feedback" data-explain="peek returns changes but leaves the slot's position alone; only get moves it forward."></p>
+  </div>
+
+  <div class="quiz-q" data-answer="2">
+    <p class="q">2. Why did the DELETE event show only the id?</p>
+    <button>the row was already empty first</button>
+    <button>test_decoding hides deleted values</button>
+    <button>Postgres logged only the primary key</button>
+    <button>the slot drops columns on delete</button>
+    <p class="feedback" data-explain="By default the WAL records only the old row's primary key for a DELETE. Lesson 4 shows how REPLICA IDENTITY changes that."></p>
+  </div>
+
+  <div class="quiz-q" data-answer="3">
+    <p class="q">3. You create a slot and forget it for a month while the app keeps writing. What happens?</p>
+    <button>the slot expires after a while</button>
+    <button>older changes are silently discarded</button>
+    <button>nothing at all, since slots are free</button>
+    <button>WAL piles up on disk, unremovable</button>
+    <p class="feedback" data-explain="A slot keeps all the WAL its consumer hasn't read yet, whether or not anyone is connected. Unread WAL keeps growing."></p>
+  </div>
+
+  <div class="quiz-q" data-answer="1">
+    <p class="q">4. What is the WAL?</p>
+    <button>a nightly backup of each table</button>
+    <button>an ordered log written before data</button>
+    <button>a cache of recently read rows</button>
+    <button>a list of currently running queries</button>
+    <p class="feedback" data-explain="Every change is appended to the WAL before the table's data files are touched. Logical decoding reads from it."></p>
+  </div>
+  <p class="quiz-score"></p>
+</div>
+
+<h2>Homework</h2>
+<div class="homework">
+  <p><strong>Primary source:</strong> PostgreSQL 18 docs, <a href="https://www.postgresql.org/docs/18/logicaldecoding-example.html">§47.1 Logical Decoding Examples</a> then <a href="https://www.postgresql.org/docs/18/logicaldecoding-explanation.html">§47.2 Logical Decoding Concepts</a>. About 20 to 30 minutes. §47.1 is almost exactly what you just did, so it should feel familiar. In §47.2, read 47.2.1 (Logical Decoding), 47.2.2 (Replication Slots) and 47.2.4 (Output Plugins) closely. Skip 47.2.3 (Slot Synchronization), which is about failover and advanced for now. Skim 47.2.5 (Exported Snapshots): the idea comes back when Debezium takes its first snapshot of your tables.</p>
+  <p><strong>Optional, very short:</strong> <a href="https://www.postgresql.org/docs/18/wal-intro.html">§28.3 Write-Ahead Logging</a>, two pages on why the WAL exists at all.</p>
+</div>
+
+<p>Commands from this lesson are collected in the <a href="../reference/postgres-cdc-cheatsheet.html">Postgres CDC cheat sheet</a>.</p>
+
+<div class="ask">Stuck, confused or curious? Ask your teacher (Claude, in the terminal). For example: <code>why does each row have its own transaction?</code> or <code>what would a CREATE TABLE look like in the slot?</code> No question is too basic.</div>
+
+<p style="font-size:0.8rem;color:var(--muted);margin-top:2rem">
+[1] PostgreSQL 18 docs, §28.3 Write-Ahead Logging. [2] PostgreSQL 18 docs, §47.2 Logical Decoding Concepts. [3] PostgreSQL 18 docs, §9.28.6 Replication Management Functions.
+</p>
+
+<nav class="lesson-nav">
+  <span>← Start of course</span>
+  <span>Next: Lesson 2 · Why forgotten slots are dangerous (coming next session)</span>
+</nav>
+
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

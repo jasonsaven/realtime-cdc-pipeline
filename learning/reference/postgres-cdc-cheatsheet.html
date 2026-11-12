@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference · Postgres CDC cheat sheet</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<header class="lesson-head">
+  <div class="kicker">Reference</div>
+  <h1>Postgres CDC cheat sheet</h1>
+  <p class="subtitle">Commands for working with logical decoding and replication slots. Grows with each lesson.</p>
+</header>
+
+<h2>Get a SQL prompt</h2>
+<pre><code>export PATH="$HOME/.docker/bin:$PATH"     # if docker isn't found
+docker compose up -d postgres
+docker compose exec postgres psql -U postgres -d shop</code></pre>
+
+<h2>Required server settings</h2>
+<table>
+  <tr><th>Setting</th><th>Value here</th><th>Why</th></tr>
+  <tr><td><code>wal_level</code></td><td><code>logical</code></td><td>The WAL records enough detail to decode row changes.</td></tr>
+  <tr><td><code>max_replication_slots</code></td><td><code>4</code></td><td>The number of slots (bookmarks) allowed.</td></tr>
+  <tr><td><code>max_wal_senders</code></td><td><code>4</code></td><td>The number of streaming replication connections allowed (Debezium uses one).</td></tr>
+</table>
+<pre><code>SHOW wal_level;</code></pre>
+
+<h2>Slots</h2>
+<table>
+  <tr><th>Task</th><th>SQL</th></tr>
+  <tr><td>Create</td><td><code>SELECT * FROM pg_create_logical_replication_slot('name', 'test_decoding');</code></td></tr>
+  <tr><td>Peek (bookmark stays put)</td><td><code>SELECT * FROM pg_logical_slot_peek_changes('name', NULL, NULL);</code></td></tr>
+  <tr><td>Get (bookmark moves forward)</td><td><code>SELECT * FROM pg_logical_slot_get_changes('name', NULL, NULL);</code></td></tr>
+  <tr><td>List</td><td><code>SELECT slot_name, plugin, active, restart_lsn, confirmed_flush_lsn FROM pg_replication_slots;</code></td></tr>
+  <tr><td>Drop</td><td><code>SELECT pg_drop_replication_slot('name');</code></td></tr>
+</table>
+<p class="callout"><strong>Rule:</strong> drop every slot you no longer need. A slot keeps all the WAL its consumer hasn't read, even when nothing is connected.</p>
+
+<h2>Reading <code>test_decoding</code> output</h2>
+<pre><code>    lsn    | xid |                    data
+-----------+-----+--------------------------------------------------------
+ 0/1BDDA38 | 755 | BEGIN 755
+ 0/1BDDAA0 | 755 | table public.orders: INSERT: id[integer]:1 item[text]:'coffee beans' qty[integer]:2
+ 0/1BDDBC0 | 755 | COMMIT 755
+ ...       | 757 | table public.orders: DELETE: id[integer]:1      ← key only, by default</code></pre>
+<p><code>lsn</code> is the position in the WAL, <code>xid</code> is the transaction id, and each transaction is wrapped in <code>BEGIN</code> … <code>COMMIT</code>.</p>
+
+<h2>Sources</h2>
+<ul>
+  <li><a href="https://www.postgresql.org/docs/18/logicaldecoding-example.html">PostgreSQL 18 · §47.1 Logical Decoding Examples</a></li>
+  <li><a href="https://www.postgresql.org/docs/18/functions-admin.html#FUNCTIONS-REPLICATION">PostgreSQL 18 · §9.28.6 Replication Management Functions</a></li>
+</ul>
+
+<nav class="lesson-nav">
+  <a href="../lessons/0001-see-your-first-change-events.html">Lesson 1 · See your first change events</a>
+</nav>
+</main>
+</body>
+</html>

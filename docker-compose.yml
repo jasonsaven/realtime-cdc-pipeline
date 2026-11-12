@@ -1,0 +1,29 @@
+# realtime-cdc-pipeline — built up one service at a time.
+# Stage 1: Postgres only, configured as a CDC source.
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: cdc-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: shop
+    command:
+      - postgres
+      # Write enough detail to the WAL that it can be decoded into row changes.
+      - -c
+      - wal_level=logical
+      # How many replication slots (consumer bookmarks) may exist.
+      - -c
+      - max_replication_slots=4
+      # How many streaming replication connections may exist (Debezium uses one).
+      - -c
+      - max_wal_senders=4
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+
+volumes:
+  pgdata:
