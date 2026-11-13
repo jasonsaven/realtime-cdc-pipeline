@@ -6,6 +6,9 @@
 - Homework can come from any high-quality source (docs, books, articles, talks). Length should fit the topic; it doesn't have to be short.
 - Owns the Kafka (Shapira et al.) and Flink (Hueske & Kalavri) books; use them as homework when those stages arrive.
 
+- Found lesson 1 dense (2026-11-12). Keep new terms to 2–3 per lesson, and say where each idea fits in the whole pipeline.
+- Practical stumbling blocks so far: missing `;` in psql, typing SQL into zsh, quitting Docker Desktop. All resolved. A "which prompt am I at?" check helps.
+
 ## Environment
 - Docker CLI is at `~/.docker/bin` and may not be on PATH. Lessons tell the learner to add it.
 - The pipeline's `docker-compose.yml` lives at the repo root and grows one service per stage. Stage 1 is `postgres:18` with `wal_level=logical`; database `shop`, user/password `postgres`.
